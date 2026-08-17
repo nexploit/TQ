@@ -18,6 +18,10 @@ Ein Python-Tool zum Verwalten, Starten, Benchmarken und Quantisieren von GGUF-Mo
   - `llama-cli.exe`
   - `llama-bench.exe`
   - `llama-quantize.exe`
+- Google's Quellcode angepasst 
+  https://github.com/AtomicBot-ai/atomic-llama-cpp-turboquant
+  muss auf dem jeweiligen System kompiliert werden da 
+  es die Basis des Python Skriptes stellt (llama*.exe)
 
 ## Beispiele
 
