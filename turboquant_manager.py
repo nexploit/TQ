@@ -29,6 +29,8 @@ DEFAULT_CONTEXT = 32768
 DEFAULT_GPU_LAYERS = "99"
 DEFAULT_FLASH_ATTN = "on"
 DEFAULT_REPETITIONS = 3
+DEFAULT_BENCH_PROMPT_TOKENS = 512
+DEFAULT_BENCH_GEN_TOKENS = 128
 DEFAULT_LOG_LEVEL = "INFO"
 
 DEFAULT_KV_TESTS = [
@@ -89,6 +91,8 @@ class BenchResult:
     model: str
     kv_type: str
     context: int
+    prompt_tokens: int
+    generation_tokens: int
     return_code: int
     duration_seconds: float
     raw_output: str
@@ -280,8 +284,12 @@ def bench_flash_attn_value(
 ) -> str:
 
     mapping = {
-        "on": "1",
-        "off": "0",
+        "1": "on",
+        "0": "off",
+        "true": "on",
+        "false": "off",
+        "on": "on",
+        "off": "off",
         "auto": "auto",
     }
 
@@ -1465,6 +1473,8 @@ def build_bench_command(
     model: Path,
     kv_type: str,
     context: int,
+    prompt_tokens: int,
+    generation_tokens: int,
     gpu_layers: str,
     flash_attn: str,
     repetitions: int,
@@ -1480,9 +1490,14 @@ def build_bench_command(
             model.resolve()
         ),
 
-        "-c",
+        "-p",
         str(
-            context
+            prompt_tokens
+        ),
+
+        "-n",
+        str(
+            generation_tokens
         ),
 
         "-ngl",
@@ -1510,6 +1525,52 @@ def extract_tokens_per_second(
     output: str,
 ) -> Optional[float]:
 
+    values: list[
+        float
+    ] = []
+
+    for line in output.splitlines():
+
+        if "|" not in line:
+            continue
+
+        cells = [
+            cell.strip()
+            for cell in line.strip().strip("|").split("|")
+        ]
+
+        if len(cells) < 2:
+            continue
+
+        last_cell = cells[-1]
+
+        if (
+            not last_cell
+            or "t/s" in last_cell.lower()
+            or set(last_cell) <= {"-", ":"}
+        ):
+            continue
+
+        match = re.search(
+            r"([\d.,]+)",
+            last_cell,
+        )
+
+        if not match:
+            continue
+
+        try:
+            values.append(
+                float(
+                    match.group(1).replace(
+                        ",",
+                        ".",
+                    )
+                )
+            )
+        except ValueError:
+            pass
+
     patterns = [
         r"([\d.,]+)\s*"
         r"(?:±\s*[\d.]+)?"
@@ -1524,10 +1585,6 @@ def extract_tokens_per_second(
         r"([\d.,]+)\s*"
         r"tok/s",
     ]
-
-    values: list[
-        float
-    ] = []
 
     for pattern in patterns:
 
@@ -1560,6 +1617,8 @@ def benchmark_one(
     model: Path,
     kv_type: str,
     context: int,
+    prompt_tokens: int,
+    generation_tokens: int,
     gpu_layers: str,
     flash_attn: str,
     repetitions: int,
@@ -1571,9 +1630,11 @@ def benchmark_one(
 
     logger.info(
         "Benchmark gestartet: "
-        "KV=%s Context=%d Wiederholungen=%d",
+        "KV=%s Context=%d Prompt=%d Gen=%d Wiederholungen=%d",
         kv_type,
         context,
+        prompt_tokens,
+        generation_tokens,
         repetitions,
     )
 
@@ -1583,6 +1644,8 @@ def benchmark_one(
             model,
             kv_type,
             context,
+            prompt_tokens,
+            generation_tokens,
             gpu_layers,
             flash_attn,
             repetitions,
@@ -1601,12 +1664,24 @@ def benchmark_one(
 
     result = run_capture(
         command,
-        log_full_output=False,
+        log_full_output=True,
     )
 
     print(
         result.output
     )
+
+    if (
+        result.status
+        == ProcessStatus.TOOL_ERROR
+        and result.output.strip()
+    ):
+
+        logger.error(
+            "Benchmark fehlgeschlagen. "
+            "Tool-Ausgabe:\n%s",
+            result.output.rstrip(),
+        )
 
     tps = (
         extract_tokens_per_second(
@@ -1635,6 +1710,8 @@ def benchmark_one(
         ),
         kv_type=kv_type,
         context=context,
+        prompt_tokens=prompt_tokens,
+        generation_tokens=generation_tokens,
         return_code=(
             result.return_code
         ),
@@ -1654,6 +1731,8 @@ def benchmark_all(
     available_kv_types: list[str],
     requested_types: list[str],
     context: int,
+    prompt_tokens: int,
+    generation_tokens: int,
     gpu_layers: str,
     flash_attn: str,
     repetitions: int,
@@ -1693,6 +1772,8 @@ def benchmark_all(
             model,
             kv_type,
             context,
+            prompt_tokens,
+            generation_tokens,
             gpu_layers,
             flash_attn,
             repetitions,
@@ -1770,6 +1851,8 @@ def save_benchmark_csv(
                 "model",
                 "kv_type",
                 "context",
+                "prompt_tokens",
+                "generation_tokens",
                 "return_code",
                 "duration_seconds",
                 "tokens_per_second",
@@ -1783,6 +1866,8 @@ def save_benchmark_csv(
                     result.model,
                     result.kv_type,
                     result.context,
+                    result.prompt_tokens,
+                    result.generation_tokens,
                     result.return_code,
                     f"{result.duration_seconds:.4f}",
                     result.tokens_per_second,
@@ -2336,6 +2421,12 @@ def interactive_mode(
                     DEFAULT_KV_TESTS
                 ),
                 context=context,
+                prompt_tokens=(
+                    DEFAULT_BENCH_PROMPT_TOKENS
+                ),
+                generation_tokens=(
+                    DEFAULT_BENCH_GEN_TOKENS
+                ),
                 gpu_layers=(
                     DEFAULT_GPU_LAYERS
                 ),
@@ -2690,6 +2781,27 @@ def create_parser() -> argparse.ArgumentParser:
         default=(
             DEFAULT_CONTEXT
         ),
+        help=(
+            "Nur für Bericht/CSV. "
+            "llama-bench verwendet stattdessen "
+            "--prompt-tokens und --gen-tokens."
+        ),
+    )
+
+    bench.add_argument(
+        "--prompt-tokens",
+        type=positive_int,
+        default=(
+            DEFAULT_BENCH_PROMPT_TOKENS
+        ),
+    )
+
+    bench.add_argument(
+        "--gen-tokens",
+        type=positive_int,
+        default=(
+            DEFAULT_BENCH_GEN_TOKENS
+        ),
     )
 
     bench.add_argument(
@@ -2935,6 +3047,12 @@ def main() -> int:
                         args.kv
                     ),
                     context=args.ctx,
+                    prompt_tokens=(
+                        args.prompt_tokens
+                    ),
+                    generation_tokens=(
+                        args.gen_tokens
+                    ),
                     gpu_layers=(
                         DEFAULT_GPU_LAYERS
                     ),
